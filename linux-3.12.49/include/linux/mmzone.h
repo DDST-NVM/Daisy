@@ -918,6 +918,16 @@ static inline int is_highmem(struct zone *zone)
 #endif
 }
 
+static inline int is_scm(struct zone *zone)
+{
+#ifdef CONFIG_SCM
+	int zone_off = (char *)zone - (char*)zone->zone_pgdat->node_zones;
+	return zone_off == ZONE_SCM * sizeof(*zone);
+#else
+	return 0;
+#endif
+}
+
 /* These two functions are used to setup the per zone pages min values */
 struct ctl_table;
 int min_free_kbytes_sysctl_handler(struct ctl_table *, int,

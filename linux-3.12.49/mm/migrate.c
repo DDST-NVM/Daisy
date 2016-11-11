@@ -1154,6 +1154,124 @@ out:
 	return rc;
 }
 
+#ifdef CONFIG_SCM
+int migrate_pages_hms(struct list_head *from, enum migrate_mode mode, int reason, int* ret_succeeded)
+{
+	int retry = 1;
+	int nr_failed = 0;
+	int nr_succeeded = 0;
+	int pass = 0;
+	struct page *page;
+	struct page *page2;
+	int swapwrite = current->flags & PF_SWAPWRITE;
+	int rc = 0;
+	
+	// only handles HMS migration!
+	if (reason != MR_HMS_TO_SCM && reason != MR_HMS_TO_DRAM)
+		return -EPERM;
+
+	if (!swapwrite)
+		current->flags |= PF_SWAPWRITE;
+
+	for(pass = 0; pass < 10 && retry; pass++) {
+		retry = 0;
+
+		list_for_each_entry_safe(page, page2, from, lru) {
+			cond_resched();
+			
+			rc = unmap_and_move_hms(page, pass > 2, mode, reason);
+
+			switch(rc) {
+			case -ENOMEM:
+				goto out;
+			case -EAGAIN:
+				retry++;
+				break;
+			case MIGRATEPAGE_SUCCESS:
+				nr_succeeded++;
+				break;
+			default:
+				/* Permanent failure */
+				nr_failed++;
+				break;
+			}
+		}
+	}
+	rc = nr_failed + retry;
+out:
+	if (nr_succeeded)
+		count_vm_events(PGMIGRATE_SUCCESS, nr_succeeded);
+	if (nr_failed)
+		count_vm_events(PGMIGRATE_FAIL, nr_failed);
+	trace_mm_migrate_pages(nr_succeeded, nr_failed, mode, reason);
+
+	if (!swapwrite)
+		current->flags &= ~PF_SWAPWRITE;
+	
+	*ret_succeeded = nr_succeeded;
+	return rc;
+}
+
+int unmap_and_move_hms(struct page *page, int force, enum migrate_mode mode, int reason)
+{
+	int rc = 0;
+	
+	struct page * newpage;
+	if (reason == MR_HMS_TO_SCM)
+		newpage = alloc_pages(GFP_KERNEL | GFP_SCM, 0);
+	else if (reason == MR_HMS_TO_DRAM)
+		newpage = alloc_pages(GFP_KERNEL, 0);
+
+	if (!newpage)
+		return -ENOMEM;
+
+	if (page_count(page) == 1) {
+		/* page was freed from under us. So we are done. */
+		goto out;
+	}
+
+	if (unlikely(PageTransHuge(page)))
+		if (unlikely(split_huge_page(page)))
+			goto out;
+
+	rc = __unmap_and_move(page, newpage, force, mode);
+
+out:
+	if (rc != -EAGAIN) {
+		/*
+		 * A page that has been migrated has all references
+		 * removed and will be freed. A page that has not been
+		 * migrated will have kepts its references and be
+		 * restored.
+		 */
+		list_del(&page->lru);
+		dec_zone_page_state(page, NR_ISOLATED_ANON +
+				page_is_file_cache(page));
+		putback_lru_page(page);
+	}
+
+	/*
+	 * If migration was not successful and there's a freeing callback, use
+	 * it.  Otherwise, putback_lru_page() will drop the reference grabbed
+	 * during isolation.
+	 */
+	if (rc != MIGRATEPAGE_SUCCESS) {
+		ClearPageSwapBacked(newpage);
+		__free_pages(newpage, 0);
+	} else {
+		// to avoid frequent migration between DRAM and SCM
+		if (reason == MR_HMS_TO_SCM)
+			ClearPageActive(newpage);			
+		else if (reason == MR_HMS_TO_DRAM)
+			SetPageActive(newpage);
+			
+		putback_lru_page(newpage);
+	}
+
+	return rc;
+}
+#endif
+
 #ifdef CONFIG_NUMA
 /*
  * Move a list of individual pages

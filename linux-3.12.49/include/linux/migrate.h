@@ -32,7 +32,9 @@ enum migrate_reason {
 	MR_SYSCALL,		/* also applies to cpusets */
 	MR_MEMPOLICY_MBIND,
 	MR_NUMA_MISPLACED,
-	MR_CMA
+	MR_CMA,
+	MR_HMS_TO_SCM,
+	MR_HMS_TO_DRAM
 };
 
 #ifdef CONFIG_MIGRATION
@@ -43,6 +45,8 @@ extern int migrate_page(struct address_space *,
 			struct page *, struct page *, enum migrate_mode);
 extern int migrate_pages(struct list_head *l, new_page_t new, free_page_t free,
 		unsigned long private, enum migrate_mode mode, int reason);
+extern int migrate_pages_hms(struct list_head *l, enum migrate_mode mode, int reason, int* nr_succeed);
+extern int unmap_and_move_hms(struct page *page, int force, enum migrate_mode mode, int reason);
 
 extern int fail_migrate_page(struct address_space *,
 			struct page *, struct page *);

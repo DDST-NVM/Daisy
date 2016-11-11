@@ -794,6 +794,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 	unsigned long nr_reclaimed = 0;
 	unsigned long nr_writeback = 0;
 	unsigned long nr_immediate = 0;
+	int zone_type = is_scm(zone);
 
 	cond_resched();
 
@@ -933,6 +934,25 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		case PAGEREF_RECLAIM_CLEAN:
 			; /* try to reclaim the page below */
 		}
+
+#ifdef CONFIG_SCM
+		// try to migrate to PCM here
+		if (zone_type) {
+			int ret = unmap_and_move_hms(page, 1, MIGRATE_SYNC, MR_HMS_TO_SCM);
+			switch(ret) {
+			case -EAGAIN:
+				list_add_tail(&page->lru, page_list);  // * add back to page list tail
+				continue;
+			case MIGRATEPAGE_SUCCESS:  // no need for regular routine
+				continue;
+			case -ENOMEM: // regular reclaim routine
+			default:
+				/* Permanent failure */
+				//isolate_lru_page(page);
+				break;
+			}
+		}
+#endif
 
 		/*
 		 * Anonymous process memory has backing store?
@@ -2965,6 +2985,224 @@ static bool kswapd_shrink_zone(struct zone *zone,
 	return sc->nr_scanned >= sc->nr_to_reclaim;
 }
 
+#ifdef CONFIG_SCM
+static int migrate_lru(enum lru_list lru, unsigned long nr_to_scan,
+		struct lruvec *lruvec, struct scan_control *sc)
+{
+	LIST_HEAD(page_list);
+	isolate_mode_t isolate_mode = 0;
+	// check isolate_mode
+	isolate_mode |= ISOLATE_ASYNC_MIGRATE;
+
+	int nr_scanned;
+	int nr_taken = isolate_lru_pages(nr_to_scan, lruvec, &page_list,
+	     &nr_scanned, sc, isolate_mode, lru);
+
+	int nr_succeeded;
+	migrate_pages_hms(&page_list, MIGRATE_SYNC, MR_HMS_TO_SCM, &nr_succeeded);
+
+	return nr_succeeded; 
+}
+
+/*
+ * borrow from shrink_lruvec()
+ */
+static void migrate_lruvec(struct lruvec *lruvec, struct scan_control *sc)
+{
+	unsigned long nr[NR_LRU_LISTS];
+	unsigned long targets[NR_LRU_LISTS];
+	unsigned long nr_to_scan;
+	unsigned long nr_migrated = 0;
+	unsigned long nr_to_migrate = sc->nr_to_reclaim;
+	enum lru_list lru;
+	struct blk_plug plug;
+	bool scan_adjusted = false;
+
+	get_scan_count(lruvec, sc, nr);
+
+	/* Record the original scan target for proportional adjustments later */
+	memcpy(targets, nr, sizeof(nr));
+
+	blk_start_plug(&plug);
+	while (nr[LRU_ACTIVE_ANON] || nr[LRU_ACTIVE_FILE]) {
+		unsigned long nr_anon, nr_file, percentage;
+		unsigned long nr_scanned;
+
+		nr_to_scan = min(nr[LRU_ACTIVE_ANON], SWAP_CLUSTER_MAX);
+		nr[LRU_ACTIVE_ANON] -= nr_to_scan;
+		nr_migrated += migrate_lru(LRU_ACTIVE_ANON, nr_to_scan, lruvec, sc);
+
+		nr_to_scan = min(nr[LRU_ACTIVE_FILE], SWAP_CLUSTER_MAX);
+		nr[LRU_ACTIVE_FILE] -= nr_to_scan;
+		nr_migrated += migrate_lru(LRU_ACTIVE_FILE, nr_to_scan, lruvec, sc);
+
+		if (nr_migrated < nr_to_migrate)
+			continue;
+
+		/*
+		 * For kswapd and memcg, reclaim at least the number of pages
+		 * requested. Ensure that the anon and file LRUs are scanned
+		 * proportionally what was requested by get_scan_count(). We
+		 * stop reclaiming one LRU and reduce the amount scanning
+		 * proportional to the original scan target.
+		 */
+		nr_file = nr[LRU_ACTIVE_FILE];
+		nr_anon = nr[LRU_ACTIVE_ANON];
+
+		/*
+		 * It's just vindictive to attack the larger once the smaller
+		 * has gone to zero.  And given the way we stop scanning the
+		 * smaller below, this makes sure that we only make one nudge
+		 * towards proportionality once we've got nr_to_reclaim.
+		 */
+		if (!nr_file || !nr_anon)
+			break;
+
+		if (nr_file > nr_anon) {
+			unsigned long scan_target = targets[LRU_ACTIVE_ANON] + 1;
+			lru = LRU_BASE;
+			percentage = nr_anon * 100 / scan_target;
+		} else {
+			unsigned long scan_target = targets[LRU_ACTIVE_FILE] + 1;
+			lru = LRU_FILE;
+			percentage = nr_file * 100 / scan_target;
+		}
+
+		/* Stop scanning the smaller of the LRU */
+		nr[lru] = 0;
+		nr[lru + LRU_ACTIVE] = 0;
+
+		/*
+		 * Recalculate the other LRU scan count based on its original
+		 * scan target and the percentage scanning already complete
+		 */
+		lru = (lru == LRU_FILE) ? LRU_BASE : LRU_FILE;
+		nr_scanned = targets[lru] - nr[lru];
+		nr[lru] = targets[lru] * (100 - percentage) / 100;
+		nr[lru] -= min(nr[lru], nr_scanned);
+
+		lru += LRU_ACTIVE;
+		nr_scanned = targets[lru] - nr[lru];
+		nr[lru] = targets[lru] * (100 - percentage) / 100;
+		nr[lru] -= min(nr[lru], nr_scanned);
+
+		scan_adjusted = true;
+	}
+	blk_finish_plug(&plug);
+	sc->nr_reclaimed += nr_migrated;
+
+	/*
+	 * Even if we did not try to evict anon pages at all, we want to
+	 * rebalance the anon lru active/inactive ratio.
+	 */
+	// here only active LRUs is reduced
+	/*
+	if (inactive_anon_is_low(lruvec))
+		shrink_active_list(SWAP_CLUSTER_MAX, lruvec,
+				   sc, LRU_ACTIVE_ANON); */
+
+	throttle_vm_writeout(sc->gfp_mask);
+}
+
+// borrow from shrink_zone()
+static void migrate_scm(struct zone *zone, struct scan_control *sc)
+{
+	unsigned long nr_migrated, nr_scanned;
+
+	do {
+		struct mem_cgroup *root = sc->target_mem_cgroup;
+		struct mem_cgroup_reclaim_cookie migrate = {
+			.zone = zone,
+			.priority = sc->priority,
+		};
+		struct mem_cgroup *memcg;
+
+		nr_migrated = sc->nr_reclaimed;
+		nr_scanned = sc->nr_scanned;
+
+		memcg = mem_cgroup_iter(root, NULL, &migrate);
+		do {
+			struct lruvec *lruvec;
+
+			lruvec = mem_cgroup_zone_lruvec(zone, memcg);
+
+			migrate_lruvec(lruvec, sc);
+
+			/*
+			 * Direct reclaim and kswapd have to scan all memory
+			 * cgroups to fulfill the overall scan target for the
+			 * zone.
+			 *
+			 * Limit reclaim, on the other hand, only cares about
+			 * nr_to_reclaim pages to be reclaimed and it will
+			 * retry with decreasing priority if one round over the
+			 * whole hierarchy is not sufficient.
+			 */
+			/*
+			if (!global_reclaim(sc) &&
+					sc->nr_reclaimed >= sc->nr_to_reclaim) {
+				mem_cgroup_iter_break(root, memcg);
+				break;
+			} */
+			memcg = mem_cgroup_iter(root, memcg, &migrate);
+		} while (memcg);
+
+		vmpressure(sc->gfp_mask, sc->target_mem_cgroup,
+			   sc->nr_scanned - nr_scanned,
+			   sc->nr_reclaimed - nr_migrated);
+
+	} while (should_continue_reclaim(zone, sc->nr_reclaimed - nr_migrated,
+					 sc->nr_scanned - nr_scanned, sc));
+}
+
+
+
+static bool migrate_zone_balanced(struct zone *zone, int order,
+			  unsigned long balance_gap, int classzone_idx)
+{
+	if (!zone_watermark_ok_safe(zone, order, low_wmark_pages(zone) +  // low watermark here to prevent frequent migration
+				    balance_gap, classzone_idx, 0))
+		return false;
+
+	if (IS_ENABLED(CONFIG_COMPACTION) && order &&
+	    !compaction_suitable(zone, order))
+		return false;
+
+	return true;
+}
+
+static bool pgdat_migrate_balanced(pg_data_t *pgdat, int order)
+{
+	unsigned long managed_pages = 0;
+	unsigned long balanced_pages = 0;
+	int i;
+
+	for (i = 0; i <= pgdat->nr_zones - 2; i++) {  // zones before SCM
+		struct zone *zone = pgdat->node_zones + i;
+
+		if (!populated_zone(zone))
+			continue;
+
+		managed_pages += zone->managed_pages;
+
+		if (!zone_reclaimable(zone)) {
+			balanced_pages += zone->managed_pages;
+			continue;
+		}
+
+		if (migrate_zone_balanced(zone, order, 0, i))
+			balanced_pages += zone->managed_pages;
+		else if (!order)
+			return false;
+	}
+
+	if (order)
+		return balanced_pages >= (managed_pages >> 2);
+	else
+		return true;
+}
+#endif
+
 /*
  * For kswapd, balance_pgdat() will work across all this node's zones until
  * they are all at high_wmark_pages(zone).
@@ -2989,6 +3227,7 @@ static bool kswapd_shrink_zone(struct zone *zone,
 static unsigned long balance_pgdat(pg_data_t *pgdat, int order,
 							int *classzone_idx)
 {
+	daisy_printk("in balance_pgdat()!");
 	int i;
 	int end_zone = 0;	/* Inclusive.  0 = ZONE_DMA */
 	unsigned long nr_soft_reclaimed;
@@ -3012,11 +3251,15 @@ static unsigned long balance_pgdat(pg_data_t *pgdat, int order,
 
 		sc.nr_reclaimed = 0;
 
+		int off = 1;
+#ifdef CONFIG_SCM
+		off = 2;
+#endif
 		/*
 		 * Scan in the highmem->dma direction for the highest
 		 * zone which needs scanning
 		 */
-		for (i = pgdat->nr_zones - 1; i >= 0; i--) {
+		for (i = pgdat->nr_zones - off; i >= 0; i--) {
 			struct zone *zone = pgdat->node_zones + i;
 
 			if (!populated_zone(zone))
@@ -3085,6 +3328,39 @@ static unsigned long balance_pgdat(pg_data_t *pgdat, int order,
 		 */
 		if (sc.priority < DEF_PRIORITY - 2)
 			sc.may_writepage = 1;
+
+
+#ifdef CONFIG_SCM
+		// try to migrate pcm to dram first if too full, then try to reclaim pcm
+		struct zone* scm = pgdat->node_zones + pgdat->nr_zones-1;
+		if (populated_zone(scm)) {
+			if (!pgdat_migrate_balanced(pgdat, order)) /* normal zones low occupation*/ {
+				migrate_scm(scm, &sc);
+			} else if (end_zone >= 0 
+				&& (sc.priority == DEF_PRIORITY || zone_reclaimable(scm))
+				&& !zone_balanced(scm, order, 0, 0)) {  // exist DRAM need to move to PCM
+				sc.nr_scanned = 0;
+				nr_soft_scanned = 0;
+
+				lru_pages += zone_reclaimable_pages(scm);
+				/*
+				 * Call soft limit reclaim before calling shrink_zone.
+				 */
+				nr_soft_reclaimed = mem_cgroup_soft_limit_reclaim(scm,
+								order, sc.gfp_mask,
+								&nr_soft_scanned);
+				sc.nr_reclaimed += nr_soft_reclaimed;
+
+				/*
+				 * There should be no need to raise the scanning
+				 * priority if enough pages are already being scanned
+				 * that that high watermark would be met at 100%
+				 * efficiency. (not for SCM)
+				 */
+				kswapd_shrink_zone(scm, scm, &sc, lru_pages, &nr_attempted);
+			}
+		}
+#endif
 
 		/*
 		 * Now scan the zone in the dma->highmem direction, stopping
@@ -3190,7 +3466,7 @@ static void kswapd_try_to_sleep(pg_data_t *pgdat, int order, int classzone_idx)
 
 	/* Try to sleep for a short interval */
 	if (prepare_kswapd_sleep(pgdat, order, remaining, classzone_idx)) {
-		remaining = schedule_timeout(HZ/10);
+		remaining = schedule_timeout(HZ*10); // HZ/10
 		finish_wait(&pgdat->kswapd_wait, &wait);
 		prepare_to_wait(&pgdat->kswapd_wait, &wait, TASK_INTERRUPTIBLE);
 	}
@@ -3199,31 +3475,31 @@ static void kswapd_try_to_sleep(pg_data_t *pgdat, int order, int classzone_idx)
 	 * After a short sleep, check if it was a premature sleep. If not, then
 	 * go fully to sleep until explicitly woken up.
 	 */
-	if (prepare_kswapd_sleep(pgdat, order, remaining, classzone_idx)) {
+	if (prepare_kswapd_sleep(pgdat, order, remaining, classzone_idx)) { /*
 		trace_mm_vmscan_kswapd_sleep(pgdat->node_id);
 
-		/*
+		
 		 * vmstat counters are not perfectly accurate and the estimated
 		 * value for counters such as NR_FREE_PAGES can deviate from the
 		 * true value by nr_online_cpus * threshold. To avoid the zone
 		 * watermarks being breached while under pressure, we reduce the
 		 * per-cpu vmstat threshold while kswapd is awake and restore
 		 * them before going back to sleep.
-		 */
+		 
 		set_pgdat_percpu_threshold(pgdat, calculate_normal_threshold);
 
-		/*
+		
 		 * Compaction records what page blocks it recently failed to
 		 * isolate pages from and skips them in the future scanning.
 		 * When kswapd is going to sleep, it is reasonable to assume
 		 * that pages and compaction may succeed so reset the cache.
-		 */
+		 
 		reset_isolation_suitable(pgdat);
 
 		if (!kthread_should_stop())
 			schedule();
 
-		set_pgdat_percpu_threshold(pgdat, calculate_pressure_threshold);
+		set_pgdat_percpu_threshold(pgdat, calculate_pressure_threshold); */
 	} else {
 		if (remaining)
 			count_vm_event(KSWAPD_LOW_WMARK_HIT_QUICKLY);
@@ -3286,6 +3562,7 @@ static int kswapd(void *p)
 	classzone_idx = new_classzone_idx = pgdat->nr_zones - 1;
 	balanced_classzone_idx = classzone_idx;
 	for ( ; ; ) {
+	daisy_printk("in kswapd() loop!");
 		bool ret;
 
 		/*
@@ -3476,7 +3753,7 @@ void kswapd_stop(int nid)
 static int __init kswapd_init(void)
 {
 	int nid;
-
+	daisy_printk("kswapd_init!");
 	swap_setup();
 	for_each_node_state(nid, N_MEMORY)
  		kswapd_run(nid);
