@@ -1222,8 +1222,11 @@ int unmap_and_move_hms(struct page *page, int force, enum migrate_mode mode, int
 	else if (reason == MR_HMS_TO_DRAM)
 		newpage = alloc_pages(GFP_KERNEL, 0);
 
-	if (!newpage)
+	if (!newpage) {
+		daisy_printk("*****[uam] .. the fuck?*****\n");
 		return -ENOMEM;
+	}
+	else daisy_printk("*****[uam] allocate success!*****\n");
 
 	if (page_count(page) == 1) {
 		/* page was freed from under us. So we are done. */

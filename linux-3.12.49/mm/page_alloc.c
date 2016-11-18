@@ -849,6 +849,8 @@ static inline void expand(struct zone *zone, struct page *page,
 	int low, int high, struct free_area *area,
 	int migratetype)
 {
+	if (is_scm(zone))
+		daisy_printk("*****in expand()*****\n");
 	unsigned long size = 1 << high;
 
 	while (high > low) {
@@ -929,6 +931,8 @@ static inline
 struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 						int migratetype)
 {
+	if (is_scm(zone))
+		daisy_printk("*****in __rmqueue_smallest()*****\n");
 	unsigned int current_order;
 	struct free_area *area;
 	struct page *page;
@@ -1168,10 +1172,14 @@ static struct page *__rmqueue(struct zone *zone, unsigned int order,
 						int migratetype)
 {
 	struct page *page;
+	if (is_scm(zone))
+		daisy_printk("*****[rmqueue] holy zone!*****\n");
 
 retry_reserve:
 	page = __rmqueue_smallest(zone, order, migratetype);
 
+	if (is_scm(zone))
+		daisy_printk("*****[rmqueue] holy zone 2!*****\n");
 	if (unlikely(!page) && migratetype != MIGRATE_RESERVE) {
 		page = __rmqueue_fallback(zone, order, migratetype);
 
@@ -1186,6 +1194,8 @@ retry_reserve:
 		}
 	}
 
+	if (is_scm(zone))
+		daisy_printk("*****[rmqueue] holy zone 3!*****\n");
 	trace_mm_page_alloc_zone_locked(page, order, migratetype);
 	return page;
 }
@@ -1952,7 +1962,7 @@ get_page_from_freelist(gfp_t gfp_mask, nodemask_t *nodemask, unsigned int order,
 	bool consider_zone_dirty = (alloc_flags & ALLOC_WMARK_LOW) &&
 				(gfp_mask & __GFP_WRITE);
 	int nr_fair_skipped = 0;
-	bool zonelist_rescan;
+	bool zonelist_rescan, need_scm = gfp_mask & GFP_SCM;
 
 zonelist_scan:
 	zonelist_rescan = false;
@@ -1963,6 +1973,12 @@ zonelist_scan:
 	 */
 	for_each_zone_zonelist_nodemask(zone, z, zonelist,
 						high_zoneidx, nodemask) {
+#ifdef CONFIG_SCM
+		if (!need_scm && is_scm(zone))
+			continue;
+		else if (need_scm && !is_scm(zone))
+			continue;
+#endif
 		unsigned long mark;
 		if (IS_ENABLED(CONFIG_NUMA) && zlc_active &&
 			!zlc_zone_worth_trying(zonelist, z, allowednodes))
@@ -1971,9 +1987,11 @@ zonelist_scan:
 			(alloc_flags & ALLOC_CPUSET) &&
 			!cpuset_zone_allowed_softwall(zone, gfp_mask))
 				continue;
+/*
 		if(gfp_mask & __GFP_SCM) {
 			goto try_this_zone;
 		}
+*/
 		/*
 		 * Distribute pages in proportion to the individual
 		 * zone size to ensure fair page aging.  The zone a
@@ -2785,10 +2803,25 @@ __alloc_pages_nodemask(gfp_t gfp_mask, unsigned int order,
 retry_cpuset:
 	cpuset_mems_cookie = read_mems_allowed_begin();
 
+#ifdef CONFIG_SCM
+	if (gfp_mask & GFP_SCM) {
+		struct zone *zone;
+		struct zoneref *z;
+		for_each_zone_zonelist_nodemask(zone, z, zonelist,
+						high_zoneidx, nodemask ? : &cpuset_current_mems_allowed) {
+			if (is_scm(zone)) {
+				preferred_zone = zone;
+				preferred_zoneref = z;
+				break;
+			}
+		}
+	} else
+#endif
 	/* The preferred zone is used for statistics later */
 	preferred_zoneref = first_zones_zonelist(zonelist, high_zoneidx,
 				nodemask ? : &cpuset_current_mems_allowed,
 				&preferred_zone);
+
 	if (!preferred_zone)
 		goto out;
 	classzone_idx = zonelist_zone_idx(preferred_zoneref);

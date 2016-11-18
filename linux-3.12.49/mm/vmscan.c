@@ -785,6 +785,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 				      unsigned long *ret_nr_immediate,
 				      bool force_reclaim)
 {
+	daisy_printk("*****[spl]*****\n");
 	LIST_HEAD(ret_pages);
 	LIST_HEAD(free_pages);
 	int pgactivate = 0;
@@ -794,7 +795,6 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 	unsigned long nr_reclaimed = 0;
 	unsigned long nr_writeback = 0;
 	unsigned long nr_immediate = 0;
-	int zone_type = is_scm(zone);
 
 	cond_resched();
 
@@ -937,7 +937,9 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 
 #ifdef CONFIG_SCM
 		// try to migrate to PCM here
-		if (zone_type) {
+		daisy_printk("*****spl: check migrate pcm*****\n");
+		if (!is_scm(zone)) {
+			daisy_printk("*****spl: try to migrate pcm*****\n");
 			int ret = unmap_and_move_hms(page, 1, MIGRATE_SYNC, MR_HMS_TO_SCM);
 			switch(ret) {
 			case -EAGAIN:
@@ -1449,6 +1451,7 @@ static noinline_for_stack unsigned long
 shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 		     struct scan_control *sc, enum lru_list lru)
 {
+	//daisy_printk("*****in shrink_inactive_list()!*****\n");
 	LIST_HEAD(page_list);
 	unsigned long nr_scanned;
 	unsigned long nr_reclaimed = 0;
@@ -3160,7 +3163,7 @@ static void migrate_scm(struct zone *zone, struct scan_control *sc)
 static bool migrate_zone_balanced(struct zone *zone, int order,
 			  unsigned long balance_gap, int classzone_idx)
 {
-	if (!zone_watermark_ok_safe(zone, order, low_wmark_pages(zone) +  // low watermark here to prevent frequent migration
+	if (!zone_watermark_ok_safe(zone, order, 2*high_wmark_pages(zone) +  // two times higher than high watermark here to prevent frequent migration
 				    balance_gap, classzone_idx, 0))
 		return false;
 
@@ -3227,7 +3230,6 @@ static bool pgdat_migrate_balanced(pg_data_t *pgdat, int order)
 static unsigned long balance_pgdat(pg_data_t *pgdat, int order,
 							int *classzone_idx)
 {
-	daisy_printk("in balance_pgdat()!");
 	int i;
 	int end_zone = 0;	/* Inclusive.  0 = ZONE_DMA */
 	unsigned long nr_soft_reclaimed;
@@ -3254,6 +3256,15 @@ static unsigned long balance_pgdat(pg_data_t *pgdat, int order,
 		int off = 1;
 #ifdef CONFIG_SCM
 		off = 2;
+		struct zone* scm = pgdat->node_zones + pgdat->nr_zones-1;
+		if (is_scm(scm) && populated_zone(scm)) {
+			//daisy_printk("*****blp: check migrate pcm*****\n");
+			if (!pgdat_migrate_balanced(pgdat, order)) /* normal DRAM zones low occupation*/ {
+				daisy_printk("*****blp: try to migrate pcm*****\n");
+				migrate_scm(scm, &sc);
+			}
+			goto out;
+		}
 #endif
 		/*
 		 * Scan in the highmem->dma direction for the highest
@@ -3331,34 +3342,29 @@ static unsigned long balance_pgdat(pg_data_t *pgdat, int order,
 
 
 #ifdef CONFIG_SCM
-		// try to migrate pcm to dram first if too full, then try to reclaim pcm
-		struct zone* scm = pgdat->node_zones + pgdat->nr_zones-1;
-		if (populated_zone(scm)) {
-			if (!pgdat_migrate_balanced(pgdat, order)) /* normal zones low occupation*/ {
-				migrate_scm(scm, &sc);
-			} else if (end_zone >= 0 
-				&& (sc.priority == DEF_PRIORITY || zone_reclaimable(scm))
-				&& !zone_balanced(scm, order, 0, 0)) {  // exist DRAM need to move to PCM
-				sc.nr_scanned = 0;
-				nr_soft_scanned = 0;
+		daisy_printk("*****blp: check reclaim pcm*****\n");
+		if (populated_zone(scm) && (sc.priority == DEF_PRIORITY || zone_reclaimable(scm))
+			&& !zone_balanced(scm, order, 0, 0)) {  // exist DRAM need to move to PCM and PCM below watermark
+			daisy_printk("*****blp: try to reclaim pcm*****\n");
+			sc.nr_scanned = 0;
+			nr_soft_scanned = 0;
 
-				lru_pages += zone_reclaimable_pages(scm);
-				/*
-				 * Call soft limit reclaim before calling shrink_zone.
-				 */
-				nr_soft_reclaimed = mem_cgroup_soft_limit_reclaim(scm,
-								order, sc.gfp_mask,
-								&nr_soft_scanned);
-				sc.nr_reclaimed += nr_soft_reclaimed;
+			lru_pages += zone_reclaimable_pages(scm);
+			/*
+			 * Call soft limit reclaim before calling shrink_zone.
+			 */
+			nr_soft_reclaimed = mem_cgroup_soft_limit_reclaim(scm,
+							order, sc.gfp_mask,
+							&nr_soft_scanned);
+			sc.nr_reclaimed += nr_soft_reclaimed;
 
-				/*
-				 * There should be no need to raise the scanning
-				 * priority if enough pages are already being scanned
-				 * that that high watermark would be met at 100%
-				 * efficiency. (not for SCM)
-				 */
-				kswapd_shrink_zone(scm, scm, &sc, lru_pages, &nr_attempted);
-			}
+			/*
+			 * There should be no need to raise the scanning
+			 * priority if enough pages are already being scanned
+			 * that that high watermark would be met at 100%
+			 * efficiency. (not for SCM)
+			 */
+			kswapd_shrink_zone(scm, pgdat->nr_zones-1, &sc, lru_pages, &nr_attempted);
 		}
 #endif
 
@@ -3456,6 +3462,7 @@ out:
 
 static void kswapd_try_to_sleep(pg_data_t *pgdat, int order, int classzone_idx)
 {
+	//daisy_printk("*****in kswapd_try_to_sleep!*****\n");
 	long remaining = 0;
 	DEFINE_WAIT(wait);
 
@@ -3466,7 +3473,7 @@ static void kswapd_try_to_sleep(pg_data_t *pgdat, int order, int classzone_idx)
 
 	/* Try to sleep for a short interval */
 	if (prepare_kswapd_sleep(pgdat, order, remaining, classzone_idx)) {
-		remaining = schedule_timeout(HZ*10); // HZ/10
+		remaining = schedule_timeout(HZ/10); // HZ/10
 		finish_wait(&pgdat->kswapd_wait, &wait);
 		prepare_to_wait(&pgdat->kswapd_wait, &wait, TASK_INTERRUPTIBLE);
 	}
@@ -3475,31 +3482,33 @@ static void kswapd_try_to_sleep(pg_data_t *pgdat, int order, int classzone_idx)
 	 * After a short sleep, check if it was a premature sleep. If not, then
 	 * go fully to sleep until explicitly woken up.
 	 */
-	if (prepare_kswapd_sleep(pgdat, order, remaining, classzone_idx)) { /*
+	if (prepare_kswapd_sleep(pgdat, order, remaining, classzone_idx)) {
 		trace_mm_vmscan_kswapd_sleep(pgdat->node_id);
 
-		
+		/*
 		 * vmstat counters are not perfectly accurate and the estimated
 		 * value for counters such as NR_FREE_PAGES can deviate from the
 		 * true value by nr_online_cpus * threshold. To avoid the zone
 		 * watermarks being breached while under pressure, we reduce the
 		 * per-cpu vmstat threshold while kswapd is awake and restore
 		 * them before going back to sleep.
+		*/
 		 
 		set_pgdat_percpu_threshold(pgdat, calculate_normal_threshold);
 
-		
+		/*
 		 * Compaction records what page blocks it recently failed to
 		 * isolate pages from and skips them in the future scanning.
 		 * When kswapd is going to sleep, it is reasonable to assume
 		 * that pages and compaction may succeed so reset the cache.
+		*/
 		 
 		reset_isolation_suitable(pgdat);
 
 		if (!kthread_should_stop())
 			schedule();
 
-		set_pgdat_percpu_threshold(pgdat, calculate_pressure_threshold); */
+		set_pgdat_percpu_threshold(pgdat, calculate_pressure_threshold);
 	} else {
 		if (remaining)
 			count_vm_event(KSWAPD_LOW_WMARK_HIT_QUICKLY);
@@ -3562,7 +3571,7 @@ static int kswapd(void *p)
 	classzone_idx = new_classzone_idx = pgdat->nr_zones - 1;
 	balanced_classzone_idx = classzone_idx;
 	for ( ; ; ) {
-	daisy_printk("in kswapd() loop!");
+		//daisy_printk("*****in kswapd() loop!*****\n");
 		bool ret;
 
 		/*
@@ -3753,7 +3762,7 @@ void kswapd_stop(int nid)
 static int __init kswapd_init(void)
 {
 	int nid;
-	daisy_printk("kswapd_init!");
+	daisy_printk("kswapd_init!\n");
 	swap_setup();
 	for_each_node_state(nid, N_MEMORY)
  		kswapd_run(nid);

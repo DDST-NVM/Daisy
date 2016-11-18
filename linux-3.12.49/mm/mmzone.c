@@ -50,8 +50,7 @@ static inline int zref_in_nodemask(struct zoneref *zref, nodemask_t *nodes)
 	return 1;
 #endif /* CONFIG_NUMA */
 }
-
-/* special design for scm: if scm just ignore zonelist mechanism */
+/*
 static int zone_ok_or_scm(struct zoneref *z, enum zone_type highest_zoneidx) {
 	if (highest_zoneidx != ZONE_SCM) {
 		return zonelist_zone_idx(z) > highest_zoneidx;
@@ -59,7 +58,7 @@ static int zone_ok_or_scm(struct zoneref *z, enum zone_type highest_zoneidx) {
 		return zonelist_zone_idx(z) != ZONE_SCM;
 	}
 }
-
+*/
 
 /* Returns the next zone at or below highest_zoneidx in a zonelist */
 struct zoneref *next_zones_zonelist(struct zoneref *z,
@@ -72,10 +71,10 @@ struct zoneref *next_zones_zonelist(struct zoneref *z,
 	 * Only filter based on nodemask if it's set
 	 */
 	if (likely(nodes == NULL))
-		while (zone_ok_or_scm(z, highest_zoneidx))
+		while (zonelist_zone_idx(z) > highest_zoneidx)
 			z++;
 	else
-		while (zone_ok_or_scm(z, highest_zoneidx) ||
+		while (zonelist_zone_idx(z) > highest_zoneidx ||
 				(z->zone && !zref_in_nodemask(z, nodes)))
 			z++;
 
