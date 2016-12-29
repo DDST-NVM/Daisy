@@ -21,7 +21,6 @@
 #define __NR_p_delete_big_region_node 328
 
 #define PCM_MAGIC 0x5A5AA5A5
-#define BITMAPGRAN 8    /* n means 1 bit to n byte */
 
 struct tagMemoryBlock {
     void    *pStart;

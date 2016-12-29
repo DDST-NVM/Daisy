@@ -47,12 +47,12 @@ int main(int argc, char **argv) {
     	for(i=0; i<t; i++) {
         	nd = (LinkedNode*)p_malloc(sizeof(LinkedNode));
     		nd->data = i;
-    		last->next = (char*)nd-base;
+    		last->next = (char*)nd-base; // last->next is the offset to the baseAddress.
     		last = nd;
     	}
 
     	last->next = 0;
-    	p_bind(1234,head,sizeof(LinkedNode));
+    	p_bind(1234,head,sizeof(LinkedNode)); // bind the address of head with pid:1234; p_bind to insert small_region_node in ptable
     } else if (argc == 2 && argv[1][0] == 'r') { /* read and check the linked list */
     	char *base = (char*)p_get_base();
     	int sz,i;
@@ -71,14 +71,14 @@ int main(int argc, char **argv) {
     			break;
     	}
     	printf("Check finish! i=%d\n",i);
-    }else if (argc == 2 && argv[1][0] == 'n') {
-	int* buf=p_new(10000,4096*2);
+    }else if (argc == 2 && argv[1][0] == 'n') { /* (alloc and write a large chunk of memory on scm) */
+		int* buf=p_new(10000,4096*2);
     	int i;
-    	for(i=0;i<4096*2/sizeof(int);i++)
+    	for(i=0;i<4096*2/sizeof(int);i++) // 4096*2 is the size of all data
     	{
     		buf[i]=i;
     	}
-    }else if (argc == 2 && argv[1][0] == 'm') {
+    }else if (argc == 2 && argv[1][0] == 'm') { // re-map and read a large chunk of memory on scm
     	int* buf=p_get(10000,4096*2);
     	int i;
     	for(i=0;i<4096*2/sizeof(int);i++)

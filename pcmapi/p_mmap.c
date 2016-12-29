@@ -5,6 +5,7 @@ static int SHM_SIZE = 0;
 static char *pBaseAddr = NULL;
 static int iBitsCount = 0;
 
+// p_mmap in file mmap.c line 3510;
 static void* p_mmap(void* addr,unsigned long len,unsigned long prot,unsigned long id) {
 	return (void*)syscall(__NR_p_mmap, addr, len, prot, id);
 }
@@ -76,7 +77,7 @@ int p_init(int size) {
     }
 
     SHM_SIZE = size;
-    iBitsCount = (SHM_SIZE)/(1 + BITMAPGRAN*8) * 8;
+    iBitsCount = (SHM_SIZE) / 9 * 8;
     /*
     这个函数将获得该程序的inode，拼接出id，然后查找table；如果发现了，则直接映射上来，
     否则，分配一块大的区域，清0，然后映射上来
@@ -116,12 +117,10 @@ int p_clear() {
         return -1;
     }
 
-    memset(pBaseAddr, 0, SHM_SIZE/(1 + BITMAPGRAN*8));
+    memset(pBaseAddr, 0, SHM_SIZE/9);
 
     return 0;
 }
-
-static int next_bit = 0;
 
 void* p_malloc(int size) {
     if (size < 0) {
@@ -149,19 +148,10 @@ void* p_malloc(int size) {
     int iStartBit = 0;
     int *ptrSize = NULL;
 
-    int n, i;
-    int ag = 1;
-    for (i=0; i<iBitsCount; i++) {
-        n = next_bit + i;
-        if (n >= iBitsCount && ag) {
-            state = STOP;
-            next_bit = 0;
-            n = -1;
-            ag = 0;
-            continue;
-        }
-
+    int n;
+    for (n=0; n<iBitsCount; n++) {
         mask = 1 << (7 - n%8);
+		// pBaseAddr[n/8]?? shouldn't be pBaseAddr[n] as the unit of size is 'Byte'.
         if (!(pBaseAddr[n/8] & mask)) {
             // nth bit is empty
 
@@ -170,15 +160,14 @@ void* p_malloc(int size) {
                     iStartBit = n;
                     state = LOOKING;
                 case LOOKING:
-                    if ((n - iStartBit + 1) * BITMAPGRAN >= size) {
+                    if (n - iStartBit + 1 >= size) {
                         // we find it 
-                        // printf("we find it, ready to set bit\n"); 
+                        //printf("we find it, ready to set bit\n"); 
                         set_bit_to_one(iStartBit, n);
-                        ptrSize = (int *)(pBaseAddr + SHM_SIZE/(1 + BITMAPGRAN*8) + iStartBit * BITMAPGRAN);
+                        ptrSize = (int *)(pBaseAddr + SHM_SIZE/9 + iStartBit);
                         *ptrSize = size;
-			next_bit = n + 1;
 
-                        return (void *)(pBaseAddr + SHM_SIZE/(1 + BITMAPGRAN*8) + iStartBit * BITMAPGRAN + 4); 
+                        return (void *)(pBaseAddr + SHM_SIZE/9 + iStartBit + 4); 
                     }
 
                     break;
@@ -218,7 +207,7 @@ int p_free(void *addr) {
         return -1;
     }
 
-    if (addr < pBaseAddr + SHM_SIZE/(1 + BITMAPGRAN*8) || addr > pBaseAddr + SHM_SIZE - 1) {
+    if (addr < pBaseAddr + SHM_SIZE/9 || addr > pBaseAddr + SHM_SIZE - 1) {
         printf("addr out of range\n"); 
         return -1;
     }
@@ -227,11 +216,9 @@ int p_free(void *addr) {
     int size = *ptrSize;
     addr = addr - 4;
 
-    int nth = ((char*)addr - pBaseAddr - SHM_SIZE/(1 + BITMAPGRAN*8)) / (BITMAPGRAN);
+    int nth = (char*)addr - pBaseAddr - SHM_SIZE/9;
     unsigned char mask;
     int n;
-    size = (size + BITMAPGRAN - 1)/ BITMAPGRAN;
-
     for (n=nth ; n<nth+size; n++) {
         mask = 1 << (7 - n%8);
         pBaseAddr[n/8] &= ~mask;
@@ -256,7 +243,7 @@ void *p_new(int pId, int iSize) {
         //return NULL;
     }
 
-    iRet = p_alloc_and_insert(pId, iSize);
+    iRet = p_alloc_and_insert(pId, iSize); 
     printf("return from p_alloc_and_insert: %d\n", (int)iRet);
     if (iRet != 0) {
         printf("error: p_alloc_and_insert\n");
