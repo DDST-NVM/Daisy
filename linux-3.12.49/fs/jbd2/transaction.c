@@ -1914,7 +1914,6 @@ int jbd2_journal_try_to_free_buffers(journal_t *journal,
 		if (buffer_jbd(bh))
 			goto busy;
 	} while ((bh = bh->b_this_page) != head);
-
 	ret = try_to_free_buffers(page);
 
 busy:

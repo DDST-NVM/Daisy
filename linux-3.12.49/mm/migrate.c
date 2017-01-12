@@ -325,7 +325,7 @@ int migrate_page_move_mapping(struct address_space *mapping,
 
 	if (!mapping) {
 		/* Anonymous page without mapping */
-		if (page_count(page) != expected_count)
+		if (page_count(page) != expected_count) 
 			return -EAGAIN;
 		return MIGRATEPAGE_SUCCESS;
 	}
@@ -578,7 +578,7 @@ int migrate_page(struct address_space *mapping,
 
 	rc = migrate_page_move_mapping(mapping, newpage, page, NULL, mode, 0);
 
-	if (rc != MIGRATEPAGE_SUCCESS)
+	if (rc != MIGRATEPAGE_SUCCESS) 
 		return rc;
 
 	migrate_page_copy(newpage, page);
@@ -598,14 +598,14 @@ int buffer_migrate_page(struct address_space *mapping,
 	struct buffer_head *bh, *head;
 	int rc;
 
-	if (!page_has_buffers(page))
+	if (!page_has_buffers(page)) 
 		return migrate_page(mapping, newpage, page, mode);
 
 	head = page_buffers(page);
 
 	rc = migrate_page_move_mapping(mapping, newpage, page, head, mode, 0);
 
-	if (rc != MIGRATEPAGE_SUCCESS)
+	if (rc != MIGRATEPAGE_SUCCESS) 
 		return rc;
 
 	/*
@@ -704,9 +704,11 @@ static int fallback_migrate_page(struct address_space *mapping,
 	 * Buffers may be managed in a filesystem specific way.
 	 * We must have no buffers or drop them.
 	 */
+
 	if (page_has_private(page) &&
-	    !try_to_release_page(page, GFP_KERNEL))
+	    !try_to_release_page(page, GFP_KERNEL)) {
 		return -EAGAIN;
+	}
 
 	return migrate_page(mapping, newpage, page, mode);
 }
@@ -743,9 +745,10 @@ static int move_to_new_page(struct page *newpage, struct page *page,
 		SetPageSwapBacked(newpage);
 
 	mapping = page_mapping(page);
-	if (!mapping)
+	if (!mapping) {
 		rc = migrate_page(mapping, newpage, page, mode);
-	else if (mapping->a_ops->migratepage)
+	}
+	else if (mapping->a_ops->migratepage) {
 		/*
 		 * Most pages have a mapping and most filesystems provide a
 		 * migratepage callback. Anonymous pages are part of swap
@@ -754,8 +757,73 @@ static int move_to_new_page(struct page *newpage, struct page *page,
 		 */
 		rc = mapping->a_ops->migratepage(mapping,
 						newpage, page, mode);
-	else
+	}
+	else {
 		rc = fallback_migrate_page(mapping, newpage, page, mode);
+	}
+
+
+	if (rc != MIGRATEPAGE_SUCCESS) {
+		newpage->mapping = NULL;
+	} else {
+		if (remap_swapcache)
+			remove_migration_ptes(page, newpage);
+		page->mapping = NULL;
+	}
+
+	unlock_page(newpage);
+
+	return rc;
+}
+
+/*
+ * Move a page to a newly allocated page
+ * The page is locked and all ptes have been successfully removed.
+ *
+ * The new page will have replaced the old page if this function
+ * is successful.
+ *
+ * Return value:
+ *   < 0 - error code
+ *  MIGRATEPAGE_SUCCESS - success
+ */
+static int move_to_new_page_period(struct page *newpage, struct page *page,
+				int remap_swapcache, enum migrate_mode mode)
+{
+	struct address_space *mapping;
+	int rc;
+
+	/*
+	 * Block others from accessing the page when we get around to
+	 * establishing additional references. We are the only one
+	 * holding a reference to the new page at this point.
+	 */
+	if (!trylock_page(newpage))
+		BUG();
+
+	/* Prepare mapping for the new page.*/
+	newpage->index = page->index;
+	newpage->mapping = page->mapping;
+	if (PageSwapBacked(page))
+		SetPageSwapBacked(newpage);
+
+	mapping = page_mapping(page);
+	if (!mapping) {
+		rc = migrate_page(mapping, newpage, page, mode);
+	}
+	else if (mapping->a_ops->migratepage) {
+		/*
+		 * Most pages have a mapping and most filesystems provide a
+		 * migratepage callback. Anonymous pages are part of swap
+		 * space which also has its own migratepage callback. This
+		 * is the most common path for page migration.
+		 */
+		rc = mapping->a_ops->migratepage(mapping,
+						newpage, page, mode);
+	}
+	else {
+		rc = fallback_migrate_page(mapping, newpage, page, mode);
+	}
 
 	if (rc != MIGRATEPAGE_SUCCESS) {
 		newpage->mapping = NULL;
@@ -815,8 +883,9 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 			rc = -EBUSY;
 			goto uncharge;
 		}
-		if (!force)
+		if (!force) {
 			goto uncharge;
+		}
 		wait_on_page_writeback(page);
 	}
 	/*
@@ -1155,6 +1224,7 @@ out:
 }
 
 #ifdef CONFIG_SCM
+// used in kswapd()->balance_pgdat()
 int migrate_pages_hms(struct list_head *from, enum migrate_mode mode, int reason, int* ret_succeeded)
 {
 	int retry = 1;
@@ -1179,7 +1249,7 @@ int migrate_pages_hms(struct list_head *from, enum migrate_mode mode, int reason
 		list_for_each_entry_safe(page, page2, from, lru) {
 			cond_resched();
 			
-			rc = unmap_and_move_hms(page, pass > 2, mode, reason);
+			rc = unmap_and_move_hms_period(page, pass > 2, mode, reason);
 
 			switch(rc) {
 			case -ENOMEM:
@@ -1188,6 +1258,7 @@ int migrate_pages_hms(struct list_head *from, enum migrate_mode mode, int reason
 				retry++;
 				break;
 			case MIGRATEPAGE_SUCCESS:
+				//print_all_pgdat_free();
 				nr_succeeded++;
 				break;
 			default:
@@ -1212,6 +1283,113 @@ out:
 	return rc;
 }
 
+static int __unmap_and_move_hms(struct page *page, struct page *newpage,
+				int force, enum migrate_mode mode)
+{
+	int rc = -EAGAIN;
+	int remap_swapcache = 1;
+	struct mem_cgroup *mem;
+	struct anon_vma *anon_vma = NULL;
+
+	/* charge against new page */
+	mem_cgroup_prepare_migration(page, newpage, &mem);
+
+	if (PageWriteback(page)) {
+		/*
+		 * Only in the case of a full synchronous migration is it
+		 * necessary to wait for PageWriteback. In the async case,
+		 * the retry loop is too short and in the sync-light case,
+		 * the overhead of stalling is too much
+		 */
+		if (mode != MIGRATE_SYNC) {
+			rc = -EBUSY;
+			goto uncharge;
+		}
+		if (!force)
+			goto uncharge;
+		wait_on_page_writeback(page);
+	}
+	/*
+	 * By try_to_unmap(), page->mapcount goes down to 0 here. In this case,
+	 * we cannot notice that anon_vma is freed while we migrates a page.
+	 * This get_anon_vma() delays freeing anon_vma pointer until the end
+	 * of migration. File cache pages are no problem because of page_lock()
+	 * File Caches may use write_page() or lock_page() in migration, then,
+	 * just care Anon page here.
+	 */
+	if (PageAnon(page) && !PageKsm(page)) {
+		/*
+		 * Only page_lock_anon_vma_read() understands the subtleties of
+		 * getting a hold on an anon_vma from outside one of its mms.
+		 */
+		anon_vma = page_get_anon_vma(page);
+		if (anon_vma) {
+			/*
+			 * Anon page
+			 */
+		} else if (PageSwapCache(page)) {
+			/*
+			 * We cannot be sure that the anon_vma of an unmapped
+			 * swapcache page is safe to use because we don't
+			 * know in advance if the VMA that this page belonged
+			 * to still exists. If the VMA and others sharing the
+			 * data have been freed, then the anon_vma could
+			 * already be invalid.
+			 *
+			 * To avoid this possibility, swapcache pages get
+			 * migrated but are not remapped when migration
+			 * completes
+			 */
+			remap_swapcache = 0;
+		} else {
+			goto uncharge;
+		}
+	}
+
+	/*
+	 * Corner case handling:
+	 * 1. When a new swap-cache page is read into, it is added to the LRU
+	 * and treated as swapcache but it has no rmap yet.
+	 * Calling try_to_unmap() against a page->mapping==NULL page will
+	 * trigger a BUG.  So handle it here.
+	 * 2. An orphaned page (see truncate_complete_page) might have
+	 * fs-private metadata. The page can be picked up due to memory
+	 * offlining.  Everywhere else except page reclaim, the page is
+	 * invisible to the vm, so the page can not be migrated.  So try to
+	 * free the metadata, so the page can be freed.
+	 */
+	if (!page->mapping) {
+		VM_BUG_ON(PageAnon(page));
+		if (page_has_private(page)) {
+			try_to_free_buffers(page);
+			goto uncharge;
+		}
+		goto skip_unmap;
+	}
+
+	/* Establish migration ptes or remove ptes */
+	try_to_unmap(page, TTU_MIGRATION|TTU_IGNORE_MLOCK|TTU_IGNORE_ACCESS);
+
+skip_unmap:
+	if (!page_mapped(page))
+		rc = move_to_new_page(newpage, page, remap_swapcache, mode);
+
+	if (rc && remap_swapcache)
+		remove_migration_ptes(page, page);
+
+	/* Drop an anon_vma reference if we took one */
+	if (anon_vma)
+		put_anon_vma(anon_vma);
+
+uncharge:
+	mem_cgroup_end_migration(mem, page, newpage,
+				 (rc == MIGRATEPAGE_SUCCESS ||
+				  rc == MIGRATEPAGE_BALLOON_SUCCESS));
+out:
+	return rc;
+}
+
+// for shrink_page_list, need another for kswapd
 int unmap_and_move_hms(struct page *page, int force, enum migrate_mode mode, int reason)
 {
 	int rc = 0;
@@ -1222,22 +1400,193 @@ int unmap_and_move_hms(struct page *page, int force, enum migrate_mode mode, int
 	else if (reason == MR_HMS_TO_DRAM)
 		newpage = alloc_pages(GFP_KERNEL, 0);
 
-	if (!newpage) {
-		daisy_printk("*****[uam] .. the fuck?*****\n");
+	if (!newpage)
 		return -ENOMEM;
+
+	if (page_count(page) == 1)
+		goto out;
+
+	if (unlikely(PageTransHuge(page)))
+		if (unlikely(split_huge_page(page)))
+			goto out;
+
+	rc = __unmap_and_move_hms(page, newpage, force, mode);
+
+out:
+	/*
+	 * If migration was not successful and there's a freeing callback, use
+	 * it.  Otherwise, putback_lru_page() will drop the reference grabbed
+	 * during isolation.
+	 */
+	if (rc != MIGRATEPAGE_SUCCESS) {
+		ClearPageSwapBacked(newpage);
+		__free_pages(newpage, 0);
+	} else {
+
+		// to avoid frequent migration between DRAM and SCM
+		if (reason == MR_HMS_TO_SCM)
+			ClearPageActive(newpage);
+		else if (reason == MR_HMS_TO_DRAM)
+			SetPageActive(newpage);
+
+		putback_lru_page(newpage);
 	}
-	else daisy_printk("*****[uam] allocate success!*****\n");
+
+	return rc;
+}
+
+static int __unmap_and_move_hms_period(struct page *page, struct page *newpage,
+				int force, enum migrate_mode mode)
+{
+	int rc = -EAGAIN;
+	int remap_swapcache = 1;
+	struct mem_cgroup *mem;
+	struct anon_vma *anon_vma = NULL;
+
+	if (!trylock_page(page)) {
+		if (!force || mode == MIGRATE_ASYNC)
+			goto out;
+
+		/*
+		 * It's not safe for direct compaction to call lock_page.
+		 * For example, during page readahead pages are added locked
+		 * to the LRU. Later, when the IO completes the pages are
+		 * marked uptodate and unlocked. However, the queueing
+		 * could be merging multiple pages for one bio (e.g.
+		 * mpage_readpages). If an allocation happens for the
+		 * second or third page, the process can end up locking
+		 * the same page twice and deadlocking. Rather than
+		 * trying to be clever about what pages can be locked,
+		 * avoid the use of lock_page for direct compaction
+		 * altogether.
+		 */
+		if (current->flags & PF_MEMALLOC)
+			goto out;
+
+		lock_page(page);
+	}
+
+	/* charge against new page */
+	mem_cgroup_prepare_migration(page, newpage, &mem);
+
+	if (PageWriteback(page)) {
+		/*
+		 * Only in the case of a full synchronous migration is it
+		 * necessary to wait for PageWriteback. In the async case,
+		 * the retry loop is too short and in the sync-light case,
+		 * the overhead of stalling is too much
+		 */
+		if (mode != MIGRATE_SYNC) {
+			rc = -EBUSY;
+			goto uncharge;
+		}
+		if (!force)
+			goto uncharge;
+		wait_on_page_writeback(page);
+	}
+	/*
+	 * By try_to_unmap(), page->mapcount goes down to 0 here. In this case,
+	 * we cannot notice that anon_vma is freed while we migrates a page.
+	 * This get_anon_vma() delays freeing anon_vma pointer until the end
+	 * of migration. File cache pages are no problem because of page_lock()
+	 * File Caches may use write_page() or lock_page() in migration, then,
+	 * just care Anon page here.
+	 */
+	if (PageAnon(page) && !PageKsm(page)) {
+		/*
+		 * Only page_lock_anon_vma_read() understands the subtleties of
+		 * getting a hold on an anon_vma from outside one of its mms.
+		 */
+		anon_vma = page_get_anon_vma(page);
+		if (anon_vma) {
+			/*
+			 * Anon page
+			 */
+		} else if (PageSwapCache(page)) {
+			/*
+			 * We cannot be sure that the anon_vma of an unmapped
+			 * swapcache page is safe to use because we don't
+			 * know in advance if the VMA that this page belonged
+			 * to still exists. If the VMA and others sharing the
+			 * data have been freed, then the anon_vma could
+			 * already be invalid.
+			 *
+			 * To avoid this possibility, swapcache pages get
+			 * migrated but are not remapped when migration
+			 * completes
+			 */
+			remap_swapcache = 0;
+		} else {
+			goto uncharge;
+		}
+	}
+
+	/*
+	 * Corner case handling:
+	 * 1. When a new swap-cache page is read into, it is added to the LRU
+	 * and treated as swapcache but it has no rmap yet.
+	 * Calling try_to_unmap() against a page->mapping==NULL page will
+	 * trigger a BUG.  So handle it here.
+	 * 2. An orphaned page (see truncate_complete_page) might have
+	 * fs-private metadata. The page can be picked up due to memory
+	 * offlining.  Everywhere else except page reclaim, the page is
+	 * invisible to the vm, so the page can not be migrated.  So try to
+	 * free the metadata, so the page can be freed.
+	 */
+	if (!page->mapping) {
+		VM_BUG_ON(PageAnon(page));
+		if (page_has_private(page)) {
+			try_to_free_buffers(page);
+			goto uncharge;
+		}
+		goto skip_unmap;
+	}
+
+	/* Establish migration ptes or remove ptes */
+	try_to_unmap(page, TTU_MIGRATION|TTU_IGNORE_MLOCK|TTU_IGNORE_ACCESS);
+
+skip_unmap:
+	if (!page_mapped(page))
+		rc = move_to_new_page_period(newpage, page, remap_swapcache, mode);
+
+	if (rc && remap_swapcache)
+		remove_migration_ptes(page, page);
+
+	/* Drop an anon_vma reference if we took one */
+	if (anon_vma)
+		put_anon_vma(anon_vma);
+
+uncharge:
+	mem_cgroup_end_migration(mem, page, newpage,
+				 (rc == MIGRATEPAGE_SUCCESS ||
+				  rc == MIGRATEPAGE_BALLOON_SUCCESS));
+	unlock_page(page);
+out:
+	return rc;
+}
+
+/*
+ * Obtain the lock on page, remove all ptes and migrate the page
+ * to the newly allocated page in newpage.
+ */
+int unmap_and_move_hms_period(struct page *page, int force, enum migrate_mode mode, int reason)
+{
+	int rc = 0;
+	struct page * newpage;
+	if (reason == MR_HMS_TO_SCM)
+		newpage = alloc_pages(GFP_KERNEL | GFP_SCM, 0);
+	else if (reason == MR_HMS_TO_DRAM)
+		newpage = alloc_pages(GFP_KERNEL, 0);
+
+	if (!newpage)
+		return -ENOMEM;
 
 	if (page_count(page) == 1) {
 		/* page was freed from under us. So we are done. */
 		goto out;
 	}
 
-	if (unlikely(PageTransHuge(page)))
-		if (unlikely(split_huge_page(page)))
-			goto out;
-
-	rc = __unmap_and_move(page, newpage, force, mode);
+	rc = __unmap_and_move_hms_period(page, newpage, force, mode);
 
 out:
 	if (rc != -EAGAIN) {
@@ -1261,15 +1610,8 @@ out:
 	if (rc != MIGRATEPAGE_SUCCESS) {
 		ClearPageSwapBacked(newpage);
 		__free_pages(newpage, 0);
-	} else {
-		// to avoid frequent migration between DRAM and SCM
-		if (reason == MR_HMS_TO_SCM)
-			ClearPageActive(newpage);			
-		else if (reason == MR_HMS_TO_DRAM)
-			SetPageActive(newpage);
-			
+	} else
 		putback_lru_page(newpage);
-	}
 
 	return rc;
 }

@@ -637,6 +637,7 @@ void clear_zonelist_oom(struct zonelist *zonelist, gfp_t gfp_mask)
 void out_of_memory(struct zonelist *zonelist, gfp_t gfp_mask,
 		int order, nodemask_t *nodemask, bool force_kill)
 {
+	daisy_printk("in out_of memory\n");
 	const nodemask_t *mpol_mask;
 	struct task_struct *p;
 	unsigned long totalpages;

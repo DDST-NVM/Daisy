@@ -849,8 +849,6 @@ static inline void expand(struct zone *zone, struct page *page,
 	int low, int high, struct free_area *area,
 	int migratetype)
 {
-	if (is_scm(zone))
-		daisy_printk("*****in expand()*****\n");
 	unsigned long size = 1 << high;
 
 	while (high > low) {
@@ -931,8 +929,6 @@ static inline
 struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 						int migratetype)
 {
-	if (is_scm(zone))
-		daisy_printk("*****in __rmqueue_smallest()*****\n");
 	unsigned int current_order;
 	struct free_area *area;
 	struct page *page;
@@ -1172,14 +1168,10 @@ static struct page *__rmqueue(struct zone *zone, unsigned int order,
 						int migratetype)
 {
 	struct page *page;
-	if (is_scm(zone))
-		daisy_printk("*****[rmqueue] holy zone!*****\n");
 
 retry_reserve:
 	page = __rmqueue_smallest(zone, order, migratetype);
 
-	if (is_scm(zone))
-		daisy_printk("*****[rmqueue] holy zone 2!*****\n");
 	if (unlikely(!page) && migratetype != MIGRATE_RESERVE) {
 		page = __rmqueue_fallback(zone, order, migratetype);
 
@@ -1194,8 +1186,6 @@ retry_reserve:
 		}
 	}
 
-	if (is_scm(zone))
-		daisy_printk("*****[rmqueue] holy zone 3!*****\n");
 	trace_mm_page_alloc_zone_locked(page, order, migratetype);
 	return page;
 }
@@ -1973,12 +1963,6 @@ zonelist_scan:
 	 */
 	for_each_zone_zonelist_nodemask(zone, z, zonelist,
 						high_zoneidx, nodemask) {
-#ifdef CONFIG_SCM
-		if (!need_scm && is_scm(zone))
-			continue;
-		else if (need_scm && !is_scm(zone))
-			continue;
-#endif
 		unsigned long mark;
 		if (IS_ENABLED(CONFIG_NUMA) && zlc_active &&
 			!zlc_zone_worth_trying(zonelist, z, allowednodes))
@@ -1987,11 +1971,7 @@ zonelist_scan:
 			(alloc_flags & ALLOC_CPUSET) &&
 			!cpuset_zone_allowed_softwall(zone, gfp_mask))
 				continue;
-/*
-		if(gfp_mask & __GFP_SCM) {
-			goto try_this_zone;
-		}
-*/
+
 		/*
 		 * Distribute pages in proportion to the individual
 		 * zone size to ensure fair page aging.  The zone a
@@ -2006,6 +1986,7 @@ zonelist_scan:
 				continue;
 			}
 		}
+
 		/*
 		 * When allocating a page cache page for writing, we
 		 * want to get it from a zone that is within its dirty
@@ -2035,6 +2016,17 @@ zonelist_scan:
 		if (consider_zone_dirty && !zone_dirty_ok(zone))
 			continue;
 
+#ifdef CONFIG_SCM
+		if (!need_scm && is_scm(zone))
+			continue;
+		if (need_scm && !is_scm(zone))
+			continue;
+
+#endif
+/*
+		if (need_scm && is_scm(scm))
+			goto try_this_zone;
+*/
 		mark = zone->watermark[alloc_flags & ALLOC_WMARK_MASK];
 		if (!zone_watermark_ok(zone, order, mark,
 				       classzone_idx, alloc_flags)) {
@@ -2068,7 +2060,7 @@ zonelist_scan:
 			if (IS_ENABLED(CONFIG_NUMA) && zlc_active &&
 				!zlc_zone_worth_trying(zonelist, z, allowednodes))
 				continue;
-
+			//daisy_printk("ever reach here?\n");
 			ret = zone_reclaim(zone, gfp_mask, order);
 			switch (ret) {
 			case ZONE_RECLAIM_NOSCAN:
@@ -2229,7 +2221,7 @@ should_alloc_retry(gfp_t gfp_mask, unsigned int order,
 		return 0;
 
 	/* Always retry if specifically requested */
-	if (gfp_mask & __GFP_NOFAIL)
+	if (gfp_mask & __GFP_NOFAIL) 
 		return 1;
 
 	/*
@@ -2429,6 +2421,7 @@ __alloc_pages_direct_reclaim(gfp_t gfp_mask, unsigned int order,
 	nodemask_t *nodemask, int alloc_flags, struct zone *preferred_zone,
 	int classzone_idx, int migratetype, unsigned long *did_some_progress)
 {
+	//daisy_printk("in alloc_pages_direct_reclaim\n");
 	struct page *page = NULL;
 	bool drained = false;
 
@@ -2617,8 +2610,9 @@ rebalance:
 	page = get_page_from_freelist(gfp_mask, nodemask, order, zonelist,
 			high_zoneidx, alloc_flags & ~ALLOC_NO_WATERMARKS,
 			preferred_zone, classzone_idx, migratetype);
-	if (page)
+	if (page) {
 		goto got_pg;
+	}
 
 	/* Allocate without watermarks if the context allows */
 	if (alloc_flags & ALLOC_NO_WATERMARKS) {
@@ -2648,7 +2642,6 @@ rebalance:
 	/* Avoid allocations with no watermarks from looping endlessly */
 	if (test_thread_flag(TIF_MEMDIE) && !(gfp_mask & __GFP_NOFAIL))
 		goto nopage;
-
 	/*
 	 * Try direct compaction. The first pass is asynchronous. Subsequent
 	 * attempts after direct reclaim are synchronous
@@ -2660,8 +2653,10 @@ rebalance:
 					migration_mode, &contended_compaction,
 					&deferred_compaction,
 					&did_some_progress);
-	if (page)
+	if (page) {
 		goto got_pg;
+	}
+
 	migration_mode = MIGRATE_SYNC_LIGHT;
 
 	/*
@@ -2681,8 +2676,9 @@ rebalance:
 					alloc_flags, preferred_zone,
 					classzone_idx, migratetype,
 					&did_some_progress);
-	if (page)
+	if (page) {
 		goto got_pg;
+	}
 
 	/*
 	 * If we failed to make any progress reclaiming, then we are
@@ -2700,8 +2696,9 @@ rebalance:
 					zonelist, high_zoneidx,
 					nodemask, preferred_zone,
 					classzone_idx, migratetype);
-			if (page)
+			if (page) {
 				goto got_pg;
+			}
 
 			if (!(gfp_mask & __GFP_NOFAIL)) {
 				/*
@@ -2745,8 +2742,9 @@ rebalance:
 					migration_mode, &contended_compaction,
 					&deferred_compaction,
 					&did_some_progress);
-		if (page)
+		if (page) {
 			goto got_pg;
+		}
 	}
 
 nopage:
@@ -3711,6 +3709,41 @@ void print_all_pgdat(void)
 		print_pgdat(pgdat);
 	}
 }
+
+#ifdef CONFIG_SCM
+static void print_pgdat_free(pg_data_t *pgdat)
+{
+	struct zone *z;
+	int i, j;
+
+	daisy_printk("%s %s\n", __FILE__, __func__);
+	/*print node_zones*/
+	for (i=0; i<MAX_NR_ZONES; ++i) {
+		daisy_printk("%s ", pgdat->node_zones[i].name);
+	}
+	daisy_printk("...\n");
+	/*print node_zonelists*/
+	for (i=0; i<MAX_ZONELISTS; ++i) {
+		for (j=0; j<(MAX_ZONES_PER_ZONELIST+1); ++j) {
+			z = pgdat->node_zonelists[i]._zonerefs[j].zone;
+			if (z == NULL) {
+				break;
+			}
+			daisy_printk("zone->free_pages: %s %lu\n", z->name, z->vm_stat[NR_FREE_PAGES]);
+		}
+		daisy_printk("...\n");
+	}
+}
+
+void print_all_pgdat_free(void)
+{
+	int nid;
+	for_each_online_node(nid) {
+		pg_data_t *pgdat = NODE_DATA(nid);
+		print_pgdat_free(pgdat);
+	}
+}
+#endif
 
 static void build_zonelists(pg_data_t *pgdat)
 {
